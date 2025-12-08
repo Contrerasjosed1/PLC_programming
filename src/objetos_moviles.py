@@ -4,8 +4,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QPushButton,
     QLabel, QGraphicsView, QGraphicsScene
 )
-from PyQt5.QtCore import Qt, QMimeData, QPoint, QByteArray
-from PyQt5.QtGui import QDrag, QBrush, QPen, QFont, QColor
+from PyQt5.QtCore import Qt, QMimeData, QPoint, QPointF, QByteArray
+from PyQt5.QtGui import QDrag, QBrush, QPen, QFont, QColor, QPainter, QPolygonF
 
 
 MIME_BLOCK_TYPE = "application/x-plc-block"
@@ -40,30 +40,28 @@ class DraggableButton(QPushButton):
         # Iniciar el drag
         drag = QDrag(self)
         mime_data = QMimeData()
-        # Metemos el tipo de bloque como bytes en el mime
+        # Guardamos el tipo de bloque como bytes
         mime_data.setData(MIME_BLOCK_TYPE, QByteArray(self.block_type.encode("utf-8")))
         drag.setMimeData(mime_data)
 
-        # Opcional: setear un pixmap para que se vea algo en el cursor
-        # aquí solo usamos el texto del botón
         drag.exec_(Qt.CopyAction)
 
 
 class WorkspaceView(QGraphicsView):
     """
     Vista del espacio de trabajo. Acepta drops de bloques
-    y crea elementos gráficos en la escena.
+    y crea formas (rectángulo, triángulo, círculo).
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         scene = QGraphicsScene(self)
         self.setScene(scene)
-        # self.setRenderHint(self.renderHints())
+
+        self.setRenderHint(QPainter.Antialiasing, True)
         self.setAcceptDrops(True)
 
-        # Estilo básico
         self.setBackgroundBrush(QColor("#1e1e1e"))
-        self.setDragMode(QGraphicsView.RubberBandDrag)  # seleccionar varios, etc.
+        self.setDragMode(QGraphicsView.RubberBandDrag)
 
     # -------- Drag & Drop desde los botones --------
     def dragEnterEvent(self, event):
@@ -86,27 +84,37 @@ class WorkspaceView(QGraphicsView):
         block_type_bytes = event.mimeData().data(MIME_BLOCK_TYPE)
         block_type = bytes(block_type_bytes).decode("utf-8")
 
-        # Coordenadas de drop en el sistema de la escena
+        # Coordenadas del drop en la escena
         pos_in_view = event.pos()
         pos_in_scene = self.mapToScene(pos_in_view)
 
         self.create_block(pos_in_scene, block_type)
         event.acceptProposedAction()
 
-    # -------- Crear un bloque en la escena --------
+    # -------- Dispatcher de formas --------
     def create_block(self, pos, block_type: str):
         """
-        Crea un bloque rectangular con texto en la posición 'pos'
-        dentro de la escena. El bloque es movable y selectable.
+        Según el tipo de bloque, crea la forma correspondiente.
+        block_type puede ser: "RECT", "TRI", "CIRC".
         """
-        scene = self.scene()
+        if block_type == "RECT":
+            self.create_rectangle_block(pos)
+        elif block_type == "TRI":
+            self.create_triangle_block(pos)
+        elif block_type == "CIRC":
+            self.create_circle_block(pos)
+        else:
+            # Por si en algún momento llega algo inesperado
+            self.create_rectangle_block(pos)
 
+    # -------- Formas individuales --------
+    def create_rectangle_block(self, pos: QPointF):
+        scene = self.scene()
         width = 120
-        height = 40
+        height = 60
         x = pos.x() - width / 2
         y = pos.y() - height / 2
 
-        # Rectángulo
         rect_item = scene.addRect(
             x, y, width, height,
             QPen(QColor("#ffffff")),
@@ -115,25 +123,75 @@ class WorkspaceView(QGraphicsView):
         rect_item.setFlag(rect_item.ItemIsMovable, True)
         rect_item.setFlag(rect_item.ItemIsSelectable, True)
 
-        # Texto
-        text_item = scene.addText(f"Bloque {block_type}", QFont("Segoe UI", 9, QFont.Bold))
+        # Etiqueta de texto dentro del rectángulo
+        text_item = scene.addText("Rectángulo", QFont("Segoe UI", 9, QFont.Bold))
         text_item.setDefaultTextColor(QColor("#ffffff"))
-        # Centrar el texto en el rectángulo
         text_rect = text_item.boundingRect()
         text_item.setPos(
             x + (width - text_rect.width()) / 2,
             y + (height - text_rect.height()) / 2
         )
-
-        # Hacemos que el texto se mueva junto con el rectángulo usando "parent"
         text_item.setParentItem(rect_item)
+
+    def create_triangle_block(self, pos: QPointF):
+        scene = self.scene()
+
+        # Triángulo isósceles centrado en pos
+        size = 60
+        p_top = QPointF(pos.x(), pos.y() - size / 2)
+        p_left = QPointF(pos.x() - size / 2, pos.y() + size / 2)
+        p_right = QPointF(pos.x() + size / 2, pos.y() + size / 2)
+
+        polygon = QPolygonF([p_top, p_left, p_right])
+
+        tri_item = scene.addPolygon(
+            polygon,
+            QPen(QColor("#ffffff")),
+            QBrush(QColor("#2d2d30"))
+        )
+        tri_item.setFlag(tri_item.ItemIsMovable, True)
+        tri_item.setFlag(tri_item.ItemIsSelectable, True)
+
+        # Texto debajo del triángulo
+        text_item = scene.addText("Triángulo", QFont("Segoe UI", 9, QFont.Bold))
+        text_item.setDefaultTextColor(QColor("#ffffff"))
+        text_rect = text_item.boundingRect()
+        text_item.setPos(
+            pos.x() - text_rect.width() / 2,
+            pos.y() + size / 2 + 4  # un poquito por debajo
+        )
+        text_item.setParentItem(tri_item)
+
+    def create_circle_block(self, pos: QPointF):
+        scene = self.scene()
+        radius = 35
+        x = pos.x() - radius
+        y = pos.y() - radius
+
+        circ_item = scene.addEllipse(
+            x, y, 2 * radius, 2 * radius,
+            QPen(QColor("#ffffff")),
+            QBrush(QColor("#2d2d30"))
+        )
+        circ_item.setFlag(circ_item.ItemIsMovable, True)
+        circ_item.setFlag(circ_item.ItemIsSelectable, True)
+
+        # Etiqueta de texto en el centro
+        text_item = scene.addText("Círculo", QFont("Segoe UI", 9, QFont.Bold))
+        text_item.setDefaultTextColor(QColor("#ffffff"))
+        text_rect = text_item.boundingRect()
+        text_item.setPos(
+            pos.x() - text_rect.width() / 2,
+            pos.y() - text_rect.height() / 2
+        )
+        text_item.setParentItem(circ_item)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("PLC Designer - PyQt5 Prototype")
+        self.setWindowTitle("PLC Designer - Formas básicas")
         self.resize(1000, 600)
 
         central = QWidget()
@@ -147,16 +205,16 @@ class MainWindow(QMainWindow):
         toolbox_layout.setContentsMargins(10, 10, 10, 10)
         toolbox_layout.setSpacing(10)
 
-        label = QLabel("Elementos PLC")
+        label = QLabel("Formas disponibles")
         label.setStyleSheet("font-size: 14px; font-weight: bold;")
         toolbox_layout.addWidget(label)
 
-        # Botones arrastrables
-        btn_a = DraggableButton("Bloque A", "A")
-        btn_b = DraggableButton("Bloque B", "B")
-        btn_c = DraggableButton("Bloque C", "C")
+        # 3 botones -> 3 tipos de figuras
+        btn_rect = DraggableButton("Rectángulo", "RECT")
+        btn_tri = DraggableButton("Triángulo", "TRI")
+        btn_circ = DraggableButton("Círculo", "CIRC")
 
-        for btn in (btn_a, btn_b, btn_c):
+        for btn in (btn_rect, btn_tri, btn_circ):
             btn.setMinimumHeight(32)
             toolbox_layout.addWidget(btn)
 
@@ -175,7 +233,7 @@ class MainWindow(QMainWindow):
         self.workspace_view = WorkspaceView()
         workspace_layout.addWidget(self.workspace_view)
 
-        # ---------- Añadir a layout principal ----------
+        # ---------- Layout principal ----------
         main_layout.addWidget(toolbox, 0)
         main_layout.addWidget(workspace_container, 1)
 
