@@ -51,10 +51,11 @@ class DraggableButton(QPushButton):
 
 class WorkspaceView(QGraphicsView):
     """
-    Vista del espacio de trabajo estructurada en renglones tipo ladder.
+    Vista del espacio de trabajo tipo ladder.
     - 4 filas (rungs).
+    - Máx N columnas; la barra vertical derecha es el límite.
     - Bloques de izquierda a derecha, sin superposición.
-    - Se puede reordenar arrastrando bloques (lista por fila).
+    - Reordenamiento arrastrando bloques.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,12 +74,16 @@ class WorkspaceView(QGraphicsView):
 
         self.base_x = 140       # centro de la primera columna
         self.col_width = 140    # distancia entre columnas
+        self.max_cols = 6       # MÁXIMO número de columnas visibles por fila
 
         # Estructura lógica: lista de filas, cada fila es lista de items (bloques)
         self.rows = [[] for _ in range(self.num_rows)]
 
         # Dibujar los rieles y renglones tipo ladder
         self._create_ladder_rungs()
+
+        # Ajustar vista inicial al contenido
+        self._fit_to_view()
 
     # ------------------------------------------------------------------
     # Dibujar ladder: rieles y rungs
@@ -88,12 +93,14 @@ class WorkspaceView(QGraphicsView):
         Dibuja:
         - Dos rieles verticales (izquierdo y derecho).
         - Un rung horizontal por cada fila.
+        Y define el rectángulo de escena para poder hacer zoom automático.
         """
         scene = self.scene()
 
-        # Definimos posición de los rieles en X
+        # Posición de los rieles en X en función de las columnas
         self.rail_x_left = self.base_x - 80
-        self.rail_x_right = self.base_x + 6 * self.col_width  # espacio para varios bloques
+        # El rail derecho queda un poco después de la última columna
+        self.rail_x_right = self.base_x + (self.max_cols - 1) * self.col_width + 80
 
         # Y de inicio/fin de los rieles verticales
         top_y = self.base_y - self.row_height
@@ -103,17 +110,21 @@ class WorkspaceView(QGraphicsView):
         pen_rail.setWidth(2)
 
         # Riel izquierdo
-        left_rail = scene.addLine(self.rail_x_left, top_y,
-                                  self.rail_x_left, bottom_y,
-                                  pen_rail)
+        left_rail = scene.addLine(
+            self.rail_x_left, top_y,
+            self.rail_x_left, bottom_y,
+            pen_rail
+        )
         left_rail.setZValue(-10)
         left_rail.setFlag(left_rail.ItemIsSelectable, False)
         left_rail.setFlag(left_rail.ItemIsMovable, False)
 
         # Riel derecho
-        right_rail = scene.addLine(self.rail_x_right, top_y,
-                                   self.rail_x_right, bottom_y,
-                                   pen_rail)
+        right_rail = scene.addLine(
+            self.rail_x_right, top_y,
+            self.rail_x_right, bottom_y,
+            pen_rail
+        )
         right_rail.setZValue(-10)
         right_rail.setFlag(right_rail.ItemIsSelectable, False)
         right_rail.setFlag(right_rail.ItemIsMovable, False)
@@ -124,12 +135,38 @@ class WorkspaceView(QGraphicsView):
 
         for r in range(self.num_rows):
             cy = self.base_y + r * self.row_height
-            rung = scene.addLine(self.rail_x_left, cy,
-                                 self.rail_x_right, cy,
-                                 pen_rung)
+            rung = scene.addLine(
+                self.rail_x_left, cy,
+                self.rail_x_right, cy,
+                pen_rung
+            )
             rung.setZValue(-10)
             rung.setFlag(rung.ItemIsSelectable, False)
             rung.setFlag(rung.ItemIsMovable, False)
+
+        # Definir rectángulo de escena para que el fitInView sepa qué mostrar
+        margin = 40
+        scene.setSceneRect(
+            self.rail_x_left - margin,
+            top_y - margin,
+            (self.rail_x_right - self.rail_x_left) + 2 * margin,
+            (bottom_y - top_y) + 2 * margin
+        )
+
+    # ------------------------------------------------------------------
+    # Zoom automático al contenido
+    # ------------------------------------------------------------------
+    def _fit_to_view(self):
+        rect = self.scene().sceneRect()
+        if not rect.isNull():
+            margin = 0
+            self.fitInView(rect.adjusted(-margin, -margin, margin, margin),
+                           Qt.KeepAspectRatio)
+
+    def resizeEvent(self, event):
+        """Cuando la vista cambia de tamaño, reencuadra el ladder."""
+        super().resizeEvent(event)
+        self._fit_to_view()
 
     # ------------------------------------------------------------------
     # Utilidades de grilla
@@ -178,8 +215,14 @@ class WorkspaceView(QGraphicsView):
 
         pos_in_scene = self.mapToScene(event.pos())
         row = self.row_from_y(pos_in_scene.y())
-        index = len(self.rows[row])  # se agrega al final de la fila
 
+        # 📌 Límite de columnas: no permitir más de max_cols
+        if len(self.rows[row]) >= self.max_cols:
+            # Fila llena -> ignoramos el drop
+            event.ignore()
+            return
+
+        index = len(self.rows[row])  # se agrega al final de la fila
         self.create_block(row, index, block_type)
         event.acceptProposedAction()
 
@@ -320,6 +363,10 @@ class WorkspaceView(QGraphicsView):
             new_index = round(rel)
             new_index = max(0, min(len(row_items), new_index))
 
+        # 📌 Respetar límite de columnas
+        if new_index >= self.max_cols:
+            new_index = self.max_cols - 1
+
         self.move_block_to(block, new_row, new_index)
 
     def _get_block_from_item(self, item):
@@ -334,22 +381,36 @@ class WorkspaceView(QGraphicsView):
     def move_block_to(self, block, new_row: int, new_index: int):
         """Reubica un bloque a (new_row, new_index) reordenando filas."""
         old_row = block.data(1)
+        old_index = block.data(2)
         if old_row is None:
             return
         old_row = int(old_row)
+        old_index = int(old_index)
+
+        old_list = self.rows[old_row]
+
+        # Si el destino es otra fila ya llena, no permitimos el cambio: volvemos a su lugar
+        if new_row != old_row and len(self.rows[new_row]) >= self.max_cols:
+            # Reacomodamos la fila original por si algo se movió visualmente
+            self.layout_row(old_row)
+            return
 
         # Sacar el bloque de su fila anterior
-        old_list = self.rows[old_row]
         if block in old_list:
             old_list.remove(block)
             self.layout_row(old_row)
 
         # Insertar en la nueva fila
         row_list = self.rows[new_row]
+
         if new_index < 0:
             new_index = 0
         if new_index > len(row_list):
             new_index = len(row_list)
+
+        # Asegurarnos de no pasarnos del límite físico
+        if new_index >= self.max_cols:
+            new_index = self.max_cols - 1
 
         row_list.insert(new_index, block)
         self.layout_row(new_row)
@@ -359,7 +420,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("PLC Designer - Ladder básico")
+        self.setWindowTitle("PLC Designer - Ladder básico (con límites)")
         self.resize(1000, 600)
 
         central = QWidget()
