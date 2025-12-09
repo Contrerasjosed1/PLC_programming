@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
 
         # Crear la sesión lógica
-        self.session = LadderSession(max_rows=4, max_cols=6)
+        self.session = LadderSession(max_rows=8, max_cols=6)
 
         # ---------- Panel izquierdo: Toolbox ----------
         toolbox = QWidget()
