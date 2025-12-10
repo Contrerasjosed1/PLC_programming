@@ -10,7 +10,7 @@ from PyQt5.QtGui import (
     QPainter
 )
 
-from session import LadderSession, BlockState  # <- NUEVO
+from session import LadderSession  # usamos la versión con grid[row][col]
 
 
 MIME_BLOCK_TYPE = "application/x-plc-block"
@@ -54,18 +54,16 @@ class DraggableButton(QPushButton):
 class WorkspaceView(QGraphicsView):
     """
     Vista del espacio de trabajo tipo ladder.
-    - Usa LadderSession para manejar posiciones y tipos.
-    - 4 filas (rungs).
-    - Máx N columnas; la barra vertical derecha es el límite.
-    - Bloques de izquierda a derecha, sin superposición.
-    - Reordenamiento arrastrando bloques.
+    - Usa LadderSession (con grid[row][col]) para manejar posiciones y tipos.
+    - Máx num_rows rungs y max_cols columnas.
+    - Reordenamiento arrastrando bloques, con desplazamiento izquierda/derecha.
     - Borrado de bloques seleccionados (botón o tecla Delete/Backspace).
     """
 
     def __init__(self, session: LadderSession, parent=None):
         super().__init__(parent)
 
-        self.session = session  # <- sesión lógica
+        self.session = session  # sesión lógica
 
         scene = QGraphicsScene(self)
         self.setScene(scene)
@@ -97,17 +95,10 @@ class WorkspaceView(QGraphicsView):
     # Dibujar ladder: rieles y rungs
     # ------------------------------------------------------------------
     def _create_ladder_rungs(self):
-        """
-        Dibuja:
-        - Dos rieles verticales (izquierdo y derecho).
-        - Un rung horizontal por cada fila.
-        Y define el rectángulo de escena para poder hacer zoom automático.
-        """
         scene = self.scene()
 
         # Posición de los rieles en X en función de las columnas
         self.rail_x_left = self.base_x - 80
-        # El rail derecho queda un poco después de la última columna
         self.rail_x_right = self.base_x + (self.max_cols - 1) * self.col_width + 80
 
         # Y de inicio/fin de los rieles verticales
@@ -137,7 +128,7 @@ class WorkspaceView(QGraphicsView):
         right_rail.setFlag(right_rail.ItemIsSelectable, False)
         right_rail.setFlag(right_rail.ItemIsMovable, False)
 
-        # Rungs horizontales (uno por fila)
+        # Rungs horizontales
         pen_rung = QPen(QColor("#888888"))
         pen_rung.setWidth(1)
 
@@ -152,7 +143,7 @@ class WorkspaceView(QGraphicsView):
             rung.setFlag(rung.ItemIsSelectable, False)
             rung.setFlag(rung.ItemIsMovable, False)
 
-        # Definir rectángulo de escena para que el fitInView sepa qué mostrar
+        # Rectángulo de escena para el fitInView
         margin = 40
         scene.setSceneRect(
             self.rail_x_left - margin,
@@ -170,7 +161,6 @@ class WorkspaceView(QGraphicsView):
             self.fitInView(rect, Qt.KeepAspectRatio)
 
     def resizeEvent(self, event):
-        """Cuando la vista cambia de tamaño, reencuadra el ladder."""
         super().resizeEvent(event)
         self._fit_to_view()
 
@@ -178,19 +168,25 @@ class WorkspaceView(QGraphicsView):
     # Utilidades de grilla
     # ------------------------------------------------------------------
     def row_from_y(self, y: float) -> int:
-        """Determina el índice de fila (0..num_rows-1) a partir de una coordenada Y."""
         r = round((y - self.base_y) / self.row_height)
         r = max(0, min(self.num_rows - 1, r))
         return r
 
-    def grid_center(self, row: int, index: int) -> QPointF:
-        """Devuelve el punto centro (cx, cy) de un slot (row, index)."""
-        cx = self.base_x + index * self.col_width
+    def col_from_x(self, x: float) -> int:
+        rel = (x - self.base_x) / self.col_width
+        c = round(rel)
+        if c < 0:
+            c = 0
+        if c >= self.max_cols:
+            c = self.max_cols - 1
+        return c
+
+    def grid_center(self, row: int, col: int) -> QPointF:
+        cx = self.base_x + col * self.col_width
         cy = self.base_y + row * self.row_height
         return QPointF(cx, cy)
 
     def set_block_center(self, item, center: QPointF):
-        """Posiciona un item para que su centro quede en 'center'."""
         br = item.boundingRect()
         x = center.x() - (br.width() / 2 + br.x())
         y = center.y() - (br.height() / 2 + br.y())
@@ -221,11 +217,12 @@ class WorkspaceView(QGraphicsView):
 
         pos_in_scene = self.mapToScene(event.pos())
         row = self.row_from_y(pos_in_scene.y())
+        col = self.col_from_x(pos_in_scene.x())
 
-        # Pedimos a la sesión que agregue al final de la fila
-        state = self.session.add_block_end_of_row(row, block_type)
+        # Dirección auto (0): la sesión intentará derecha y luego izquierda
+        state = self.session.add_block_at(row, col, block_type, direction=0)
         if state is None:
-            # fila llena
+            # fila sin espacio
             event.ignore()
             return
 
@@ -237,7 +234,7 @@ class WorkspaceView(QGraphicsView):
 
         self.items_by_id[state.id] = item
 
-        # Ubicar todos los bloques de esa fila
+        # Reposicionar toda la fila
         self.layout_row(row)
 
         event.acceptProposedAction()
@@ -246,10 +243,6 @@ class WorkspaceView(QGraphicsView):
     # Crear bloque gráfico segun tipo (símbolos ladder)
     # ------------------------------------------------------------------
     def _create_graphics_block(self, block_type: str):
-        """
-        Crea el QGraphicsItem del símbolo ladder.
-        Aquí solo construimos el shape, no manejamos posiciones lógicas.
-        """
         if block_type == "XIC":
             return self._create_contact_no_block()
         elif block_type == "XIO":
@@ -263,10 +256,6 @@ class WorkspaceView(QGraphicsView):
 
     # --- Constructores de símbolos ladder (gráficos) ---
     def _create_contact_no_block(self):
-        """
-        XIC - Contacto normalmente abierto:
-        Rectángulo base + dos líneas verticales internas.
-        """
         scene = self.scene()
         width = 120
         height = 50
@@ -296,10 +285,6 @@ class WorkspaceView(QGraphicsView):
         return rect
 
     def _create_contact_nc_block(self):
-        """
-        XIO - Contacto normalmente cerrado:
-        Igual que NO pero con una línea diagonal cruzando.
-        """
         rect = self._create_contact_no_block()
         scene = self.scene()
         br = rect.boundingRect()
@@ -323,10 +308,6 @@ class WorkspaceView(QGraphicsView):
         return rect
 
     def _create_coil_block(self, coil_type="OTE"):
-        """
-        OTE/OTL/OTU - Bobina:
-        Rectángulo base + círculo interno + etiqueta pequeña.
-        """
         scene = self.scene()
         width = 120
         height = 50
@@ -339,7 +320,6 @@ class WorkspaceView(QGraphicsView):
         rect.setFlag(rect.ItemIsMovable, True)
         rect.setFlag(rect.ItemIsSelectable, True)
 
-        # Círculo central
         radius = 14
         cx = width / 2
         cy = height / 2
@@ -363,10 +343,6 @@ class WorkspaceView(QGraphicsView):
         return rect
 
     def _create_timer_block(self):
-        """
-        TON - Timer:
-        Rectángulo base + recuadro interno y texto TON.
-        """
         scene = self.scene()
         width = 120
         height = 50
@@ -401,19 +377,20 @@ class WorkspaceView(QGraphicsView):
         return rect
 
     # ------------------------------------------------------------------
-    # Layout de filas en función de la sesión
+    # Layout de filas en función de la sesión (grid[row][col])
     # ------------------------------------------------------------------
     def layout_row(self, row: int):
-        """Reposiciona gráficamente todos los bloques de una fila según el orden de la sesión."""
         if not (0 <= row < self.num_rows):
             return
 
-        row_ids = self.session.rows[row]  # lista de IDs en esa fila
-        for index, block_id in enumerate(row_ids):
+        for col in range(self.max_cols):
+            block_id = self.session.grid[row][col]
+            if block_id is None:
+                continue
             item = self.items_by_id.get(block_id)
             if item is None:
                 continue
-            center = self.grid_center(row, index)
+            center = self.grid_center(row, col)
             self.set_block_center(item, center)
 
     # ------------------------------------------------------------------
@@ -426,7 +403,6 @@ class WorkspaceView(QGraphicsView):
         if item is None:
             return
 
-        # Si el item es hijo (línea, texto), subimos al padre
         block_item = self._get_block_from_item(item)
         if block_item is None:
             return
@@ -435,38 +411,37 @@ class WorkspaceView(QGraphicsView):
         if block_id is None:
             return
 
-        # Centro en coordenadas de escena
+        block_id = int(block_id)
+
+        # Centro del bloque en escena
         center_scene = block_item.mapToScene(block_item.boundingRect().center())
         new_row = self.row_from_y(center_scene.y())
+        target_col = self.col_from_x(center_scene.x())
 
-        # Cálculo de índice destino aproximado por X
-        row_list = self.session.rows[new_row]
-        if not row_list:
-            new_index = 0
+        # Determinar dirección según la posición relativa dentro de la celda
+        cell_center_x = self.base_x + target_col * self.col_width
+        if center_scene.x() >= cell_center_x:
+            direction = +1   # empujar hacia la derecha
         else:
-            rel = (center_scene.x() - self.base_x) / self.col_width
-            new_index = round(rel)
-            if new_index < 0:
-                new_index = 0
-            if new_index > len(row_list):
-                new_index = len(row_list)
+            direction = -1   # empujar hacia la izquierda
 
-        # Pedir a la sesión el movimiento
-        moved = self.session.move_block(int(block_id), new_row, new_index)
+        moved = self.session.move_block(block_id, new_row, target_col, direction=direction)
         if moved is None:
-            # Movimiento inválido (por ejemplo fila destino llena): re-layout fila original
-            state = self.session.get_block_state(int(block_id))
+            # No se pudo mover (fila sin espacio, etc.) -> reposicionar donde está en la sesión
+            state = self.session.get_block_state(block_id)
             if state:
-                self.layout_row(state.row)
+                center = self.grid_center(state.row, state.index)
+                self.set_block_center(block_item, center)
             return
 
-        old_row, final_row = moved
+        (old_row, old_col), (final_row, final_col) = moved
         self.layout_row(old_row)
         if final_row != old_row:
             self.layout_row(final_row)
+        else:
+            self.layout_row(final_row)
 
     def _get_block_from_item(self, item):
-        """Si el item es un bloque o un hijo de bloque, devuelve el bloque principal."""
         it = item
         while it is not None:
             if it.data(0) == "BLOCK":
@@ -478,22 +453,20 @@ class WorkspaceView(QGraphicsView):
     # Borrado de bloques
     # ------------------------------------------------------------------
     def delete_block(self, block_item):
-        """Elimina un bloque de la escena y de la sesión."""
         block_id = block_item.data(1)
         if block_id is None:
             return
 
         block_id = int(block_id)
-        row = self.session.delete_block(block_id)
-        # Eliminar el item y sus hijos gráficos
+        pos = self.session.delete_block(block_id)
         self.scene().removeItem(block_item)
         self.items_by_id.pop(block_id, None)
 
-        if row is not None:
+        if pos is not None:
+            row, _ = pos
             self.layout_row(row)
 
     def delete_selected(self):
-        """Elimina todos los bloques seleccionados."""
         selected = self.scene().selectedItems()
         processed = set()
         for item in selected:
@@ -503,7 +476,6 @@ class WorkspaceView(QGraphicsView):
                 self.delete_block(block)
 
     def keyPressEvent(self, event):
-        """Permite borrar con Delete o Backspace."""
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.delete_selected()
         else:
@@ -514,7 +486,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("PLC Designer - Ladder con sesión")
+        self.setWindowTitle("PLC Designer - Ladder con sesión (grid)")
         self.resize(1000, 600)
 
         central = QWidget()
@@ -522,7 +494,7 @@ class MainWindow(QMainWindow):
 
         main_layout = QHBoxLayout(central)
 
-        # Crear la sesión lógica
+        # Sesión lógica: 8 rungs x 6 columnas
         self.session = LadderSession(max_rows=8, max_cols=6)
 
         # ---------- Panel izquierdo: Toolbox ----------
@@ -535,7 +507,6 @@ class MainWindow(QMainWindow):
         label.setStyleSheet("font-size: 14px; font-weight: bold;")
         toolbox_layout.addWidget(label)
 
-        # 6 símbolos
         btn_xic = DraggableButton("XIC (NO)", "XIC")
         btn_xio = DraggableButton("XIO (NC)", "XIO")
         btn_ote = DraggableButton("OTE (Coil)", "OTE")
@@ -547,10 +518,13 @@ class MainWindow(QMainWindow):
             btn.setMinimumHeight(30)
             toolbox_layout.addWidget(btn)
 
-        # Botón para eliminar el bloque seleccionado
         delete_btn = QPushButton("Eliminar seleccionado")
         delete_btn.clicked.connect(self.on_delete_clicked)
+
+        print_btn = QPushButton("Imprimir estructura")
+        print_btn.clicked.connect(self.on_print_clicked)
         toolbox_layout.addWidget(delete_btn)
+        toolbox_layout.addWidget(print_btn)
 
         toolbox_layout.addStretch()
 
@@ -560,7 +534,7 @@ class MainWindow(QMainWindow):
         workspace_layout.setContentsMargins(10, 10, 10, 10)
         workspace_layout.setSpacing(5)
 
-        workspace_label = QLabel("Espacio de trabajo (4 rungs)")
+        workspace_label = QLabel("Espacio de trabajo (8 rungs)")
         workspace_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         workspace_layout.addWidget(workspace_label)
 
@@ -572,8 +546,23 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(workspace_container, 1)
 
     def on_delete_clicked(self):
-        """Conecta el botón 'Eliminar seleccionado' con el workspace."""
         self.workspace_view.delete_selected()
+
+    def on_print_clicked(self):
+        """Imprime en consola la estructura del grid con el tipo de elemento."""
+        print("\n=== Estructura actual del grid ===")
+        for r in range(self.session.max_rows):
+            fila_repr = []
+            for c in range(self.session.max_cols):
+                block_id = self.session.grid[r][c]
+                if block_id is None:
+                    fila_repr.append(".")  # celda vacía
+                else:
+                    btype = self.session.block_types.get(block_id, "?")
+                    # Puedes elegir: sólo tipo, o tipo+id
+                    fila_repr.append(f"{btype}({block_id})")
+            print(f"Fila {r}: " + "  ".join(fila_repr))
+        print("===================================\n")
 
 
 def main():
